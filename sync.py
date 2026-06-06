@@ -117,6 +117,7 @@ def close_confirmation_dialog(page) -> None:
 def get_playlist_row(page, playlist_name: str):
     """Return the first row locator that contains the playlist name."""
     row = page.locator(
+        f".mat-mdc-row:has-text('{playlist_name}'), "
         f"mat-row:has-text('{playlist_name}'), "
         f"tr:has-text('{playlist_name}')"
     ).first
@@ -201,7 +202,11 @@ def main() -> None:
             page.locator("button[type='submit']").click()
 
             log("Waiting for playlists page to render...")
-            page.wait_for_selector("mat-row, tr.mat-row", timeout=60_000)
+            page.wait_for_selector(
+                "h2:has-text('My Playlists'), h1:has-text('My Playlists'), "
+                ".mat-mdc-row, mat-row",
+                timeout=60_000,
+            )
             time.sleep(2)
             log("Playlists page ready.")
 
