@@ -18,51 +18,43 @@ def log(msg: str) -> None:
     print(f"[m3u4u] {msg}", flush=True)
 
 
-def setup_turnstile_intercept(page) -> None:
-    """Inject an early script that hooks window.turnstile before any page JS runs.
-
-    m3u4u uses explicit render mode — Angular calls turnstile.render(el, {sitekey})
-    programmatically, so data-sitekey never appears in the DOM. We capture it here.
-    """
-    page.add_init_script("""
-        window.__capturedSiteKey = null;
-        let _turnstile = null;
-        Object.defineProperty(window, 'turnstile', {
-            configurable: true,
-            enumerable: true,
-            get: () => _turnstile,
-            set: (val) => {
-                _turnstile = val;
-                if (val && typeof val.render === 'function') {
-                    const orig = val.render.bind(val);
-                    val.render = function(el, opts) {
-                        if (opts && opts.sitekey) window.__capturedSiteKey = opts.sitekey;
-                        return orig(el, opts);
-                    };
-                }
-            }
-        });
-    """)
-
-
 def solve_turnstile(page) -> "str | None":
-    """Wait for the intercepted site key then solve via Capsolver."""
-    log("  Waiting for Turnstile site key (intercepted from turnstile.render)...")
-    site_key = None
+    """Wait for the Cloudflare Turnstile iframe to render, then extract the site key
+    from its URL — non-invasive, works with explicit-render Angular components."""
+    log("  Waiting for Turnstile widget (app-turnstile component)...")
     try:
-        page.wait_for_function("window.__capturedSiteKey !== null", timeout=12_000)
-        site_key = page.evaluate("window.__capturedSiteKey")
+        page.wait_for_selector("app-turnstile", timeout=12_000)
     except PlaywrightTimeoutError:
-        pass
+        log("  Turnstile component not found — skipping CAPTCHA solve")
+        return None
 
-    # Fallback: implicit render mode (data-sitekey attribute)
-    if not site_key:
-        el = page.locator("[data-sitekey]").first
-        if el.count() > 0:
-            site_key = el.get_attribute("data-sitekey")
+    # Give Cloudflare's script a moment to inject the iframe
+    time.sleep(2)
+
+    site_key = None
+    for frame in page.frames:
+        if "challenges.cloudflare.com" in frame.url:
+            log(f"  Found Cloudflare frame: {frame.url[:120]}")
+            # Param-based: ?sitekey=... or ?k=...
+            for param in ("sitekey", "k", "site_key"):
+                m = re.search(rf"[?&]{param}=([^&]+)", frame.url)
+                if m:
+                    site_key = m.group(1)
+                    break
+            # Path-based fallback: /v0/<site_key>/
+            if not site_key:
+                m = re.search(r"/v0/([0-9a-zA-Z_\-.]{20,})(?:/|\?|$)", frame.url)
+                if m:
+                    site_key = m.group(1)
+            if site_key:
+                break
 
     if not site_key:
-        log("  No Turnstile site key found — skipping CAPTCHA solve")
+        log("  Could not extract site key from frames. Frame URLs:")
+        for frame in page.frames:
+            if frame.url:
+                log(f"    {frame.url}")
+        log("  Skipping CAPTCHA solve")
         return None
 
     log(f"  Turnstile site key: {site_key}")
@@ -184,7 +176,6 @@ def main() -> None:
 
         try:
             # ── Login ─────────────────────────────────────────────────────────────
-            setup_turnstile_intercept(page)
             log("Navigating to https://m3u4u.com/login ...")
             page.goto("https://m3u4u.com/login", wait_until="domcontentloaded")
 
