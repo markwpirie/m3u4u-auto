@@ -116,15 +116,16 @@ def close_confirmation_dialog(page) -> None:
 
 def get_playlist_row(page, playlist_name: str):
     """Return the first row locator that contains the playlist name."""
-    row = page.locator(
-        f".mat-mdc-row:has-text('{playlist_name}'), "
-        f"mat-row:has-text('{playlist_name}'), "
-        f"tr:has-text('{playlist_name}')"
-    ).first
+    row = page.locator(".mat-mdc-row, mat-row, tr").filter(has_text=playlist_name).first
     try:
         row.wait_for(timeout=15_000)
     except PlaywrightTimeoutError:
-        raise RuntimeError(f"Could not find a row containing '{playlist_name}'")
+        with open("debug_playlists.html", "w", encoding="utf-8") as fh:
+            fh.write(page.content())
+        raise RuntimeError(
+            f"Could not find a row containing '{playlist_name}' — "
+            "page HTML saved to debug_playlists.html"
+        )
     return row
 
 
