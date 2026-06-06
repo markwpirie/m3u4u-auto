@@ -41,9 +41,9 @@ def solve_turnstile(page) -> "str | None":
                 if m:
                     site_key = m.group(1)
                     break
-            # Path-based fallback: /v0/<site_key>/
+            # Path-based: Turnstile site keys always start with 0x
             if not site_key:
-                m = re.search(r"/v0/([0-9a-zA-Z_\-.]{20,})(?:/|\?|$)", frame.url)
+                m = re.search(r"/(0x[0-9a-zA-Z]+)(?:/|$)", frame.url)
                 if m:
                     site_key = m.group(1)
             if site_key:
