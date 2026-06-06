@@ -18,14 +18,18 @@ def log(msg: str) -> None:
     print(f"[m3u4u] {msg}", flush=True)
 
 
-def solve_turnstile(page) -> str | None:
+def solve_turnstile(page) -> "str | None":
     """Detect and solve Cloudflare Turnstile via Capsolver. Returns token or None if no widget found."""
-    site_key = None
+    log("  Waiting for Turnstile widget to render...")
+    try:
+        page.wait_for_selector(".cf-turnstile, [data-sitekey]", timeout=10_000)
+    except PlaywrightTimeoutError:
+        log("  No Turnstile widget detected — skipping CAPTCHA solve")
+        return None
 
-    # Try data-sitekey attribute on the widget element
-    widget = page.locator("[data-sitekey]").first
-    if widget.count() > 0:
-        site_key = widget.get_attribute("data-sitekey")
+    site_key = None
+    widget = page.locator(".cf-turnstile, [data-sitekey]").first
+    site_key = widget.get_attribute("data-sitekey")
 
     # Regex fallback on raw page source
     if not site_key:
@@ -34,7 +38,7 @@ def solve_turnstile(page) -> str | None:
             site_key = match.group(1)
 
     if not site_key:
-        log("  No Turnstile widget detected — skipping CAPTCHA solve")
+        log("  Widget found but site key not extractable — skipping CAPTCHA solve")
         return None
 
     log(f"  Turnstile site key: {site_key}")
@@ -55,8 +59,17 @@ def inject_turnstile_token(page, token: str) -> None:
     """Inject a solved Turnstile token into the page and fire any success callbacks."""
     page.evaluate(
         """(token) => {
-            document.querySelectorAll('input[name="cf-turnstile-response"]')
-                .forEach(el => { el.value = token; });
+            // Find or create the hidden response input Cloudflare expects
+            let input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (!input) {
+                input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'cf-turnstile-response';
+                const widget = document.querySelector('.cf-turnstile') || document.body;
+                widget.appendChild(input);
+            }
+            input.value = token;
+            // Fire success callbacks declared on the widget
             document.querySelectorAll('[data-callback]').forEach(widget => {
                 const cb = widget.getAttribute('data-callback');
                 if (cb && typeof window[cb] === 'function') window[cb](token);
