@@ -20,25 +20,57 @@ def log(msg: str) -> None:
 
 def solve_turnstile(page) -> "str | None":
     """Detect and solve Cloudflare Turnstile via Capsolver. Returns token or None if no widget found."""
-    log("  Waiting for Turnstile widget to render...")
+    # Let Angular and Cloudflare scripts finish loading
+    log("  Waiting for page to settle...")
     try:
-        page.wait_for_selector(".cf-turnstile, [data-sitekey]", timeout=10_000)
+        page.wait_for_load_state("networkidle", timeout=15_000)
     except PlaywrightTimeoutError:
-        log("  No Turnstile widget detected — skipping CAPTCHA solve")
-        return None
+        pass  # proceed even if not fully idle
 
     site_key = None
-    widget = page.locator(".cf-turnstile, [data-sitekey]").first
-    site_key = widget.get_attribute("data-sitekey")
 
-    # Regex fallback on raw page source
+    # Strategy 1: standard .cf-turnstile div
+    try:
+        page.wait_for_selector(".cf-turnstile", timeout=8_000)
+        site_key = page.locator(".cf-turnstile").first.get_attribute("data-sitekey")
+    except PlaywrightTimeoutError:
+        pass
+
+    # Strategy 2: any element carrying data-sitekey
     if not site_key:
-        match = re.search(r'data-sitekey=["\']([^"\']+)["\']', page.content())
-        if match:
-            site_key = match.group(1)
+        el = page.locator("[data-sitekey]").first
+        if el.count() > 0:
+            site_key = el.get_attribute("data-sitekey")
+
+    # Strategy 3: pull site key from the Cloudflare iframe src
+    if not site_key:
+        iframe = page.locator("iframe[src*='challenges.cloudflare.com']").first
+        if iframe.count() > 0:
+            src = iframe.get_attribute("src") or ""
+            m = re.search(r'[?&](?:sitekey|k)=([^&]+)', src)
+            if not m:
+                m = re.search(r'challenges\.cloudflare\.com/[^/]+/([0-9A-Za-z_-]{20,})', src)
+            if m:
+                site_key = m.group(1)
+
+    # Strategy 4: regex sweep of full page HTML
+    if not site_key:
+        html = page.content()
+        for pattern in [
+            r'data-sitekey=["\']([^"\']+)["\']',
+            r'"sitekey"\s*:\s*"([^"]+)"',
+            r'"siteKey"\s*:\s*"([^"]+)"',
+        ]:
+            m = re.search(pattern, html)
+            if m:
+                site_key = m.group(1)
+                break
 
     if not site_key:
-        log("  Widget found but site key not extractable — skipping CAPTCHA solve")
+        log("  Turnstile not detected — saving debug_page.html for inspection")
+        with open("debug_page.html", "w", encoding="utf-8") as fh:
+            fh.write(page.content())
+        log("  Skipping CAPTCHA solve")
         return None
 
     log(f"  Turnstile site key: {site_key}")
@@ -166,17 +198,18 @@ def main() -> None:
             log("Waiting for login form...")
             page.wait_for_selector("input[type='email']", timeout=30_000)
 
+            # Solve Turnstile first — it needs networkidle to fully render
+            token = solve_turnstile(page)
+
             log(f"Filling email: {EMAIL}")
             page.fill("input[type='email']", EMAIL)
 
             log("Filling password...")
             page.fill("input[type='password']", PASSWORD)
 
-            # Solve Turnstile before submitting
-            token = solve_turnstile(page)
             if token:
                 inject_turnstile_token(page, token)
-                time.sleep(1)  # brief pause so the page registers the token
+                time.sleep(1)
 
             log("Clicking login button...")
             page.locator("button[type='submit']").click()
