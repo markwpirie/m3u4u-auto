@@ -115,38 +115,19 @@ def close_confirmation_dialog(page) -> None:
 
 
 def get_playlist_row(page, playlist_name: str):
-    """Return the first row locator that contains the playlist name."""
-    row = page.locator(".mat-mdc-row, mat-row, tr").filter(has_text=playlist_name).first
+    """Return the AG Grid row containing the playlist name."""
+    row = page.locator("div[role='row'].ag-row").filter(has_text=playlist_name).first
     try:
         row.wait_for(timeout=15_000)
     except PlaywrightTimeoutError:
-        with open("debug_playlists.html", "w", encoding="utf-8") as fh:
-            fh.write(page.content())
-        raise RuntimeError(
-            f"Could not find a row containing '{playlist_name}' — "
-            "page HTML saved to debug_playlists.html"
-        )
+        raise RuntimeError(f"Could not find AG Grid row containing '{playlist_name}'")
     return row
-
-
-def find_row_button_by_icon(page, row, *icon_names):
-    """Return the first button in the row that contains a mat-icon matching one of the names."""
-    for name in icon_names:
-        btn = row.locator("button").filter(
-            has=page.locator("mat-icon").filter(has_text=name)
-        )
-        if btn.count() > 0:
-            return btn.first
-    return None
 
 
 def click_sync_button(page, playlist_name: str) -> None:
     log(f"  Finding sync button for '{playlist_name}'...")
     row = get_playlist_row(page, playlist_name)
-    btn = find_row_button_by_icon(page, row, "sync", "refresh", "sync_alt")
-    if btn is None:
-        log("  → Icon not matched; falling back to first button in row")
-        btn = row.locator("button").first
+    btn = row.locator("button.ag-grid-btn-sync, button[title='Sync Now']").first
     btn.scroll_into_view_if_needed()
     btn.click()
     log(f"  → Sync button clicked for '{playlist_name}'")
@@ -155,10 +136,7 @@ def click_sync_button(page, playlist_name: str) -> None:
 def click_push_button(page, playlist_name: str) -> None:
     log(f"  Finding Dropbox push button for '{playlist_name}'...")
     row = get_playlist_row(page, playlist_name)
-    btn = find_row_button_by_icon(page, row, "cloud_upload", "publish", "backup", "upload")
-    if btn is None:
-        log("  → Icon not matched; falling back to second button in row")
-        btn = row.locator("button").nth(1)
+    btn = row.locator("button.ag-grid-btn-push, button[title='Push to Dropbox']").first
     btn.scroll_into_view_if_needed()
     btn.click()
     log(f"  → Push button clicked for '{playlist_name}'")
@@ -203,11 +181,7 @@ def main() -> None:
             page.locator("button[type='submit']").click()
 
             log("Waiting for playlists page to render...")
-            page.wait_for_selector(
-                "h2:has-text('My Playlists'), h1:has-text('My Playlists'), "
-                ".mat-mdc-row, mat-row",
-                timeout=60_000,
-            )
+            page.wait_for_selector("div[role='row'].ag-row", timeout=60_000)
             time.sleep(2)
             log("Playlists page ready.")
 
