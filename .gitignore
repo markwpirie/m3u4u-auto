@@ -20,3 +20,4 @@ error_screenshot.png
 
 # Logs
 *.log
+.command
