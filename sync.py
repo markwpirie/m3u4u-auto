@@ -1,18 +1,70 @@
 import os
+import re
 import sys
 import time
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from dotenv import load_dotenv
+import capsolver
 
 load_dotenv()
 
 EMAIL = "markwpirie@aol.com"
 PASSWORD = os.getenv("M3U4U_PASSWORD")
+CAPSOLVER_API_KEY = os.getenv("CAPSOLVER_API_KEY")
 WAIT_SECONDS = 60
 
 
 def log(msg: str) -> None:
     print(f"[m3u4u] {msg}", flush=True)
+
+
+def solve_turnstile(page) -> str | None:
+    """Detect and solve Cloudflare Turnstile via Capsolver. Returns token or None if no widget found."""
+    site_key = None
+
+    # Try data-sitekey attribute on the widget element
+    widget = page.locator("[data-sitekey]").first
+    if widget.count() > 0:
+        site_key = widget.get_attribute("data-sitekey")
+
+    # Regex fallback on raw page source
+    if not site_key:
+        match = re.search(r'data-sitekey=["\']([^"\']+)["\']', page.content())
+        if match:
+            site_key = match.group(1)
+
+    if not site_key:
+        log("  No Turnstile widget detected — skipping CAPTCHA solve")
+        return None
+
+    log(f"  Turnstile site key: {site_key}")
+    log("  Sending to Capsolver (typically 5–15s)...")
+
+    capsolver.api_key = CAPSOLVER_API_KEY
+    solution = capsolver.solve({
+        "type": "AntiTurnstileTaskProxyless",
+        "websiteURL": page.url,
+        "websiteKey": site_key,
+    })
+    token = solution["token"]
+    log("  Turnstile solved ✓")
+    return token
+
+
+def inject_turnstile_token(page, token: str) -> None:
+    """Inject a solved Turnstile token into the page and fire any success callbacks."""
+    page.evaluate(
+        """(token) => {
+            document.querySelectorAll('input[name="cf-turnstile-response"]')
+                .forEach(el => { el.value = token; });
+            document.querySelectorAll('[data-callback]').forEach(widget => {
+                const cb = widget.getAttribute('data-callback');
+                if (cb && typeof window[cb] === 'function') window[cb](token);
+            });
+        }""",
+        token,
+    )
+    log("  Token injected into page")
 
 
 def close_confirmation_dialog(page) -> None:
@@ -27,13 +79,13 @@ def close_confirmation_dialog(page) -> None:
         log("  → Clicked 'Yes'")
         dialog.wait_for(state="hidden", timeout=10_000)
         log("  → Dialog closed")
-        time.sleep(1)  # let the UI settle after dialog close
+        time.sleep(1)
     except PlaywrightTimeoutError as exc:
         raise RuntimeError("Confirmation dialog did not appear or 'Yes' button not found") from exc
 
 
 def get_playlist_row(page, playlist_name: str):
-    """Return the first row locator that contains the exact playlist name."""
+    """Return the first row locator that contains the playlist name."""
     row = page.locator(
         f"mat-row:has-text('{playlist_name}'), "
         f"tr:has-text('{playlist_name}')"
@@ -46,7 +98,7 @@ def get_playlist_row(page, playlist_name: str):
 
 
 def find_row_button_by_icon(page, row, *icon_names):
-    """Find the first button in the row that has a mat-icon matching one of the names."""
+    """Return the first button in the row that contains a mat-icon matching one of the names."""
     for name in icon_names:
         btn = row.locator("button").filter(
             has=page.locator("mat-icon").filter(has_text=name)
@@ -59,12 +111,10 @@ def find_row_button_by_icon(page, row, *icon_names):
 def click_sync_button(page, playlist_name: str) -> None:
     log(f"  Finding sync button for '{playlist_name}'...")
     row = get_playlist_row(page, playlist_name)
-
     btn = find_row_button_by_icon(page, row, "sync", "refresh", "sync_alt")
     if btn is None:
-        log("  → Sync icon not matched by name; falling back to first button in row")
+        log("  → Icon not matched; falling back to first button in row")
         btn = row.locator("button").first
-
     btn.scroll_into_view_if_needed()
     btn.click()
     log(f"  → Sync button clicked for '{playlist_name}'")
@@ -73,25 +123,24 @@ def click_sync_button(page, playlist_name: str) -> None:
 def click_push_button(page, playlist_name: str) -> None:
     log(f"  Finding Dropbox push button for '{playlist_name}'...")
     row = get_playlist_row(page, playlist_name)
-
     btn = find_row_button_by_icon(page, row, "cloud_upload", "publish", "backup", "upload")
     if btn is None:
-        log("  → Push icon not matched by name; falling back to second button in row")
+        log("  → Icon not matched; falling back to second button in row")
         btn = row.locator("button").nth(1)
-
     btn.scroll_into_view_if_needed()
     btn.click()
     log(f"  → Push button clicked for '{playlist_name}'")
 
 
 def main() -> None:
-    if not PASSWORD:
-        log("ERROR: M3U4U_PASSWORD environment variable is not set.")
-        log("Copy .env.example to .env and fill in your password.")
+    missing = [k for k, v in {"M3U4U_PASSWORD": PASSWORD, "CAPSOLVER_API_KEY": CAPSOLVER_API_KEY}.items() if not v]
+    if missing:
+        for key in missing:
+            log(f"ERROR: {key} is not set in .env")
         sys.exit(1)
 
     with sync_playwright() as p:
-        log("Launching Chromium (non-headless so Cloudflare Turnstile can pass)...")
+        log("Launching Chromium (non-headless for Cloudflare)...")
         browser = p.chromium.launch(headless=False)
         context = browser.new_context()
         page = context.new_page()
@@ -110,13 +159,18 @@ def main() -> None:
             log("Filling password...")
             page.fill("input[type='password']", PASSWORD)
 
+            # Solve Turnstile before submitting
+            token = solve_turnstile(page)
+            if token:
+                inject_turnstile_token(page, token)
+                time.sleep(1)  # brief pause so the page registers the token
+
             log("Clicking login button...")
             page.locator("button[type='submit']").click()
 
             log("Waiting for playlists page to render...")
-            # Wait for at least one playlist row — covers both mat-table and plain table
             page.wait_for_selector("mat-row, tr.mat-row", timeout=60_000)
-            time.sleep(2)  # allow Angular to finish rendering all rows
+            time.sleep(2)
             log("Playlists page ready.")
 
             # ── Step 1: Sync Silver-Surf - Copy ───────────────────────────────────
@@ -150,9 +204,8 @@ def main() -> None:
         except Exception as exc:
             log(f"FATAL ERROR: {exc}")
             try:
-                screenshot_path = "error_screenshot.png"
-                page.screenshot(path=screenshot_path)
-                log(f"Screenshot saved → {screenshot_path}")
+                page.screenshot(path="error_screenshot.png")
+                log("Screenshot saved → error_screenshot.png")
             except Exception:
                 pass
             sys.exit(1)
