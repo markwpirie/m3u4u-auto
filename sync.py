@@ -11,7 +11,8 @@ load_dotenv()
 EMAIL = "markwpirie@aol.com"
 PASSWORD = os.getenv("M3U4U_PASSWORD")
 CAPSOLVER_API_KEY = os.getenv("CAPSOLVER_API_KEY")
-WAIT_SECONDS = 60
+WAIT_AFTER_SYNC = 15
+WAIT_BETWEEN_PLAYLISTS = 45
 
 
 def log(msg: str) -> None:
@@ -185,28 +186,26 @@ def main() -> None:
             time.sleep(2)
             log("Playlists page ready.")
 
-            # ── Step 1: Sync Silver-Surf - Copy ───────────────────────────────────
+            # ── Playlist 1: Silver-Surf - Copy ────────────────────────────────────
             log("─── Step 1/4: Sync 'Silver-Surf - Copy' ───")
             click_sync_button(page, "Silver-Surf - Copy")
             close_confirmation_dialog(page)
-            log(f"Waiting {WAIT_SECONDS}s ...")
-            time.sleep(WAIT_SECONDS)
+            log(f"Waiting {WAIT_AFTER_SYNC}s ...")
+            time.sleep(WAIT_AFTER_SYNC)
 
-            # ── Step 2: Sync MARK Small List ──────────────────────────────────────
-            log("─── Step 2/4: Sync 'MARK Small List' ───")
-            click_sync_button(page, "MARK Small List")
-            close_confirmation_dialog(page)
-            log(f"Waiting {WAIT_SECONDS}s ...")
-            time.sleep(WAIT_SECONDS)
-
-            # ── Step 3: Push Silver-Surf - Copy to Dropbox ────────────────────────
-            log("─── Step 3/4: Push 'Silver-Surf - Copy' to Dropbox ───")
+            log("─── Step 2/4: Push 'Silver-Surf - Copy' to Dropbox ───")
             click_push_button(page, "Silver-Surf - Copy")
             close_confirmation_dialog(page)
-            log(f"Waiting {WAIT_SECONDS}s ...")
-            time.sleep(WAIT_SECONDS)
+            log(f"Waiting {WAIT_BETWEEN_PLAYLISTS}s ...")
+            time.sleep(WAIT_BETWEEN_PLAYLISTS)
 
-            # ── Step 4: Push MARK Small List to Dropbox ───────────────────────────
+            # ── Playlist 2: MARK Small List ───────────────────────────────────────
+            log("─── Step 3/4: Sync 'MARK Small List' ───")
+            click_sync_button(page, "MARK Small List")
+            close_confirmation_dialog(page)
+            log(f"Waiting {WAIT_AFTER_SYNC}s ...")
+            time.sleep(WAIT_AFTER_SYNC)
+
             log("─── Step 4/4: Push 'MARK Small List' to Dropbox ───")
             click_push_button(page, "MARK Small List")
             close_confirmation_dialog(page)
