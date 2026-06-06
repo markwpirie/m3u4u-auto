@@ -18,43 +18,42 @@ def log(msg: str) -> None:
     print(f"[m3u4u] {msg}", flush=True)
 
 
+def setup_turnstile_patch(page) -> None:
+    """Inject a polling init script that patches turnstile.render() AFTER Cloudflare's
+    script assigns it — captures the site key AND Angular's callback function.
+    Polling (not Object.defineProperty) so the widget still renders normally."""
+    page.add_init_script("""
+        window.__capturedSiteKey = null;
+        window.__turnstileCallback = null;
+        (function patchWhenReady() {
+            if (window.turnstile && typeof window.turnstile.render === 'function'
+                    && !window.turnstile.__patched) {
+                const orig = window.turnstile.render.bind(window.turnstile);
+                window.turnstile.render = function(el, opts) {
+                    if (opts) {
+                        if (opts.sitekey) window.__capturedSiteKey = opts.sitekey;
+                        if (typeof opts.callback === 'function')
+                            window.__turnstileCallback = opts.callback;
+                    }
+                    return orig(el, opts);
+                };
+                window.turnstile.__patched = true;
+            } else {
+                setTimeout(patchWhenReady, 10);
+            }
+        })();
+    """)
+
+
 def solve_turnstile(page) -> "str | None":
-    """Wait for the Cloudflare Turnstile iframe to render, then extract the site key
-    from its URL — non-invasive, works with explicit-render Angular components."""
-    log("  Waiting for Turnstile widget (app-turnstile component)...")
-    try:
-        page.wait_for_selector("app-turnstile", timeout=12_000)
-    except PlaywrightTimeoutError:
-        log("  Turnstile component not found — skipping CAPTCHA solve")
-        return None
-
-    # Give Cloudflare's script a moment to inject the iframe
-    time.sleep(2)
-
+    """Wait for the patched turnstile.render() to fire, then solve via Capsolver."""
+    log("  Waiting for Turnstile site key...")
     site_key = None
-    for frame in page.frames:
-        if "challenges.cloudflare.com" in frame.url:
-            log(f"  Found Cloudflare frame: {frame.url[:120]}")
-            # Param-based: ?sitekey=... or ?k=...
-            for param in ("sitekey", "k", "site_key"):
-                m = re.search(rf"[?&]{param}=([^&]+)", frame.url)
-                if m:
-                    site_key = m.group(1)
-                    break
-            # Path-based: Turnstile site keys always start with 0x
-            if not site_key:
-                m = re.search(r"/(0x[0-9a-zA-Z]+)(?:/|$)", frame.url)
-                if m:
-                    site_key = m.group(1)
-            if site_key:
-                break
-
-    if not site_key:
-        log("  Could not extract site key from frames. Frame URLs:")
-        for frame in page.frames:
-            if frame.url:
-                log(f"    {frame.url}")
-        log("  Skipping CAPTCHA solve")
+    try:
+        page.wait_for_function("window.__capturedSiteKey !== null", timeout=15_000)
+        site_key = page.evaluate("window.__capturedSiteKey")
+    except PlaywrightTimeoutError:
+        log("  Turnstile render() not detected — skipping CAPTCHA solve")
         return None
 
     log(f"  Turnstile site key: {site_key}")
@@ -72,28 +71,30 @@ def solve_turnstile(page) -> "str | None":
 
 
 def inject_turnstile_token(page, token: str) -> None:
-    """Inject a solved Turnstile token into the page and fire any success callbacks."""
+    """Deliver the solved token to Angular via two routes:
+    1. Set the hidden DOM input (standard form submit path).
+    2. Call the callback Angular registered with turnstile.render() (reactive form path).
+    """
     page.evaluate(
         """(token) => {
-            // Find or create the hidden response input Cloudflare expects
+            // Route 1: hidden input
             let input = document.querySelector('input[name="cf-turnstile-response"]');
             if (!input) {
                 input = document.createElement('input');
                 input.type = 'hidden';
                 input.name = 'cf-turnstile-response';
-                const widget = document.querySelector('.cf-turnstile') || document.body;
-                widget.appendChild(input);
+                (document.querySelector('.cf-turnstile') || document.body).appendChild(input);
             }
             input.value = token;
-            // Fire success callbacks declared on the widget
-            document.querySelectorAll('[data-callback]').forEach(widget => {
-                const cb = widget.getAttribute('data-callback');
-                if (cb && typeof window[cb] === 'function') window[cb](token);
-            });
+
+            // Route 2: Angular's reactive-form callback captured at render() time
+            if (typeof window.__turnstileCallback === 'function') {
+                window.__turnstileCallback(token);
+            }
         }""",
         token,
     )
-    log("  Token injected into page")
+    log("  Token delivered (hidden input + Angular callback)")
 
 
 def close_confirmation_dialog(page) -> None:
@@ -176,6 +177,7 @@ def main() -> None:
 
         try:
             # ── Login ─────────────────────────────────────────────────────────────
+            setup_turnstile_patch(page)
             log("Navigating to https://m3u4u.com/login ...")
             page.goto("https://m3u4u.com/login", wait_until="domcontentloaded")
 
